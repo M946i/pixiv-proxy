@@ -1,13 +1,11 @@
-/** Vercel Edge Function - Pixiv API 反代 */
-const ENABLE_API_PROXY = true;
-const ENABLE_IMAGE_PROXY = true;
-const ENABLE_OAUTH_PROXY = false;
 
-const PIXIV_API_HOST = 'app-api.pixiv.net';
-const PIXIV_OAUTH_HOST = 'oauth.secure.pixiv.net';
-const PIXIV_IMAGE_HOST = 'i.pximg.net';
+/** Vercel Edge Function - Pixiv 图片反向代理 */
 
-export const config = { runtime: 'edge' };
+export const config = {
+  runtime: 'edge',
+};
+
+const PIXIV_HOST = 'i.pximg.net';
 
 export default async function handler(req) {
   if (req.method === 'OPTIONS') {
@@ -15,63 +13,67 @@ export default async function handler(req) {
       status: 204,
       headers: {
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+        'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
         'Access-Control-Allow-Headers': '*',
       },
     });
   }
 
-  const url = new URL(req.url);
-  let targetHost;
-  let path = url.pathname;
-
-  // 移除 /api 前缀
-  path = path.replace(/^\/api/, '');
-
-  if (ENABLE_OAUTH_PROXY && (path.startsWith('/oauth/') || path.startsWith('/auth/'))) {
-    targetHost = PIXIV_OAUTH_HOST;
-    path = path.replace('/oauth', '').replace('/auth', '');
-  } else if (ENABLE_IMAGE_PROXY && path.startsWith('/image/')) {
-    targetHost = PIXIV_IMAGE_HOST;
-    path = path.replace('/image', '');
-  } else if (ENABLE_API_PROXY) {
-    targetHost = PIXIV_API_HOST;
-  } else {
-    return new Response(JSON.stringify({ error: 'Service not enabled' }), {
-      status: 403,
-      headers: { 'Content-Type': 'application/json' },
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    return new Response('Method Not Allowed', {
+      status: 405,
     });
   }
 
-  const targetUrl = `https://${targetHost}${path}${url.search}`;
+  const url = new URL(req.url);
+
+  // 保留原始路径及查询参数，仅替换 hostname
+  const targetUrl = `https://${PIXIV_HOST}${url.pathname}${url.search}`;
 
   const headers = new Headers(req.headers);
-  headers.set('Host', targetHost);
-  headers.set('Referer', 'https://app-api.pixiv.net/');
-  headers.set('User-Agent', 'PixivIOSApp/7.13.3 (iOS 14.6; iPhone13,2)');
-  headers.set('App-OS', 'ios');
-  headers.set('App-OS-Version', '14.6');
-  headers.set('App-Version', '7.13.3');
 
-  const newRequest = new Request(targetUrl, {
-    method: req.method,
-    headers: headers,
-    body: req.method !== 'GET' && req.method !== 'HEAD' ? req.body : null,
-  });
+  // 移除不应该转发的请求头
+  headers.delete('host');
+  headers.delete('connection');
+
+  // Pixiv 图片服务器要求的来源信息
+  headers.set('Referer', 'https://www.pixiv.net/');
+  headers.set('User-Agent', 'Mozilla/5.0');
 
   try {
-    const response = await fetch(newRequest);
-    const newResponse = new Response(response.body, {
+    const response = await fetch(targetUrl, {
+      method: req.method,
+      headers,
+      redirect: 'follow',
+    });
+
+    const responseHeaders = new Headers(response.headers);
+
+    responseHeaders.set('Access-Control-Allow-Origin', '*');
+    responseHeaders.set(
+      'Access-Control-Allow-Methods',
+      'GET, HEAD, OPTIONS'
+    );
+
+    // 保留原始 Content-Type、Content-Length 等响应头
+    return new Response(response.body, {
       status: response.status,
-      statusText: response.statusText,
-      headers: response.headers,
+      headers: responseHeaders,
     });
-    newResponse.headers.set('Access-Control-Allow-Origin', '*');
-    return newResponse;
   } catch (error) {
-    return new Response(JSON.stringify({ error: error.message }), {
-      status: 502,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return new Response(
+      JSON.stringify({
+        error: 'Pixiv proxy failed',
+        message: error.message,
+      }),
+      {
+        status: 502,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Access-Control-Allow-Origin': '*',
+        },
+      }
+    );
   }
 }
+
